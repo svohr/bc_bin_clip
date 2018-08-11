@@ -1,0 +1,184 @@
+#!/usr/bin/env python2
+
+"""
+bc_bin_clip
+
+This script takes as input two barcode strings (left and right) as they would
+appear at the start of the forward and reverse reads and two fastq files
+(forward and reverse reads) and produces two pairs of files: one where the two
+barcodes were correctly identified at the start of both reads in a pair and the
+other pair where one of both of the barcodes were not found at the start of the
+reads. The barcode sequence will be removed from the start of each read only.
+Any barcode sequence that appears reverse complemented in the middle of the
+read will remain and will be left for another tool (SeqPrep) to remove when
+reads are merged. An option will allow for imperfect matching of barcodes
+(allowing a base to match an N in the read for example).
+
+Sam Vohr (svohr@soe.ucsc.edu)
+Wed Feb 11 13:54:08 PST 2015
+
+#############
+#############
+#############
+Kelly temporarily modified this version to not include the barcode in the output file name! 
+#############
+#############
+#############
+
+"""
+
+
+import argparse
+import sys
+import re
+import gzip
+import itertools
+
+from Bio import SeqIO
+
+
+def open_input_files(args):
+    """ Opens the input files checking the file extension to see if they
+        are gzipped """
+    def open_file(filename):
+        """ Open single file, may or may not be gzipped """
+        if args.read1_filename.endswith('.gz'):
+            return gzip.open(filename, 'r')
+        else:
+            return open(filename, 'r')
+    return (open_file(args.read1_filename), open_file(args.read2_filename))
+
+
+def open_output_files(args):
+    """ Uses the read filenames or user specified prefix to open new files
+        for output. """
+    r1_prefix = ''
+    r2_prefix = ''
+    if args.out_prefix is None:
+        # remove file extension
+        r1_prefix = re.sub(r'(\.fastq|\.fq)(\.gz)?$', '', args.read1_filename)
+        r2_prefix = re.sub(r'(\.fastq|\.fq)(\.gz)?$', '', args.read2_filename)
+    else:
+        r1_prefix = '%s_R1' % (args.out_prefix)
+        r2_prefix = '%s_R2' % (args.out_prefix)
+    found_r1_out_fn = '%s.fastq' % (r1_prefix)
+    found_r2_out_fn = '%s.fastq' % (r2_prefix)
+    missing_r1_out_fn = '%s_unmatched.fastq' % (r1_prefix)
+    missing_r2_out_fn = '%s_unmatched.fastq' % (r2_prefix)
+
+    found_r1_out = open(found_r1_out_fn, 'w')
+    found_r2_out = open(found_r2_out_fn, 'w')
+    missing_r1_out = open(missing_r1_out_fn, 'w')
+    missing_r2_out = open(missing_r2_out_fn, 'w')
+
+    return (found_r1_out, found_r2_out, missing_r1_out, missing_r2_out)
+
+
+def barcode_match(read, barcode, ok_mismatch=0):
+    """ Returns true if the read begins with the barcode sequence or if it
+        matches within a certain tolerance for mismatches, false otherwise. """
+    if read.seq.startswith(barcode):
+        return True
+    else:
+        mismatch = 0
+        for i in xrange(len(barcode)):
+            if barcode[i] != read.seq[i]:
+                mismatch += 1
+        #print str(read.seq[:len(barcode)]), barcode, mismatch
+        if mismatch <= ok_mismatch:
+            return True
+    return False
+
+
+def trim_barcode(read, barcode):
+    """ Removes the length of the barcode from the beginning of the read """
+    return read[len(barcode):]
+
+
+def process_reads(args):
+    """ Reads in all input reads, looks for barcode, trims if found and writes
+        reads to output files. """
+    # open reads for input
+    in_read1, in_read2 = open_input_files(args)
+
+    bc_read1 = args.read1_barcode
+    bc_read2 = args.read2_barcode
+
+    # open reads for output
+    out_found_r1, out_found_r2, out_missing_r1, out_missing_r2 \
+        = open_output_files(args)
+
+    # read pairs of reads at a time.
+    for read1, read2 in itertools.izip(SeqIO.parse(in_read1, 'fastq'),
+                                       SeqIO.parse(in_read2, 'fastq')):
+        if read1.id != read2.id:
+            sys.stderr.write('Error: Mismatched read IDs (%s, %s,)' %
+                             (read1.id, read2.id))
+            sys.exit(1)
+
+        # Check if barcodes are present in _both_ reads
+        if (barcode_match(read1, bc_read1, args.mismatches) and
+            barcode_match(read2, bc_read2, args.mismatches)):
+            if args.trim:
+                read1 = trim_barcode(read1, bc_read1)
+                read2 = trim_barcode(read2, bc_read2)
+            SeqIO.write(read1, out_found_r1, 'fastq')
+            SeqIO.write(read2, out_found_r2, 'fastq')
+        else:
+            SeqIO.write(read1, out_missing_r1, 'fastq')
+            SeqIO.write(read2, out_missing_r2, 'fastq')
+
+    # Close out all the files used.
+    in_read1.close()
+    in_read2.close()
+    out_found_r1.close()
+    out_found_r2.close()
+    out_missing_r1.close()
+    out_missing_r2.close()
+    return
+
+
+def main(argv=None):
+    """
+    Reads commandline input of two barcode strings (left and right) as they
+    would appear at the start of the forward and reverse reads and two
+    fastq files (forward and reverse reads) and produces two pairs of files:
+    one where the two barcodes were correctly identified at the start of both
+    reads in a pair and the other pair where one of both of the barcodes where
+    not found at the start of the reads. The barcode sequence will be removed
+    from the start of each read only.
+    """
+    if argv is None:
+        argv = sys.argv
+
+    usage = 'bc_bin_clip [OPTIONS] <R1_BC> <R2_BC> <R1.fastq> <R2.fastq>'
+    parser = argparse.ArgumentParser(usage)
+    parser.add_argument('read1_barcode', metavar='R1_BC_SEQ',
+                        help='Barcode to find and trim from R1 file')
+    parser.add_argument('read2_barcode', metavar='R2_BC_SEQ',
+                        help='Barcode to find and trim from R2 file')
+    parser.add_argument('read1_filename', metavar='R1_FQ_FILE',
+                        help='fastq file containing forward reads')
+    parser.add_argument('read2_filename', metavar='R2_FQ_FILE',
+                        help='fastq file containing reverse reads')
+    parser.add_argument('-p', '--prefix', dest='out_prefix', default=None,
+                        help='Prefix for output files.')
+    parser.add_argument('-n', '--no-trim', dest='trim', default=True,
+                        action='store_false',
+                        help='Do not trim found barcodes.')
+    parser.add_argument('-m', '--mismatches', dest='mismatches',
+                        type=int, default=0,
+                        help='Number of mismatches to allow in barcode '
+                             'sequence (default=0)', metavar='N')
+
+    args = parser.parse_args()
+
+    print args
+    process_reads(args)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
